@@ -1,0 +1,196 @@
+(ns ipni.ipni-test
+  (:require [clojure.test :refer [deftest is]]
+            [ipni.ad :as ad]
+            [ipni.advertise :as advertise]
+            [ipni.announce :as announce]
+            [ipni.find :as find]
+            [ipni.hamt :as hamt]
+            [ipni.head :as head]
+            [ipni.http :as http]
+            [ipni.metadata :as metadata]))
+
+(def content-cid "bafkreicidcontent000000000000000000000000000000000000000")
+(def peer "12D3KooWproviderpeer")
+(def retrieval ["/dns4/ipfs.kotobase.net/tcp/443/https"])
+(def publisher ["/dns4/ipfs.kotobase.net/tcp/443/https"])
+(def mh [0x12 0x20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
+         17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32])
+
+(def rec {:cid content-cid :peer peer :addrs retrieval})
+
+;; ── metadata ──────────────────────────────────────────────────────────────
+
+(deftest gateway-http-is-0x0920-as-uvarint
+  (is (= [0xA0 0x12] (metadata/gateway-http-bytes)))
+  (is (metadata/gateway-http? (metadata/gateway-http-bytes)))
+  (is (= 0x0920 (:protocol (metadata/decode (metadata/gateway-http-bytes)))))
+  (is (= "transport-ipfs-gateway-http"
+         (:name (metadata/decode (metadata/gateway-http-bytes))))))
+
+(deftest empty-metadata-is-not-protocol-zero
+  (is (= :empty (:error (metadata/decode []))))
+  (is (= :negative (:error (metadata/uvarint-encode -1)))))
+
+;; ── advertisement does not rewrite the content CID ────────────────────────
+
+(deftest advertisement-keeps-the-content-cid
+  (let [a (ad/advertisement {:cid content-cid :peer peer :addrs retrieval
+                             :context-id "pin:t1" :entries [mh]})]
+    (is (= content-cid (:cid a)))
+    (is (false? (:mutates-cid? a)))
+    (is (= :ipni.advertisement (:schema a)))
+    (is (= [0xA0 0x12] (:metadata a)))))
+
+(deftest advertisement-refuses-empty-entries-unless-rm
+  (is (= :empty-entries
+         (:error (ad/advertisement {:cid content-cid :peer peer :addrs retrieval
+                                    :context-id "pin:t1"}))))
+  (let [rm (ad/advertisement {:cid content-cid :peer peer :addrs retrieval
+                              :context-id "pin:t1" :is-rm true})]
+    (is (true? (:is-rm rm)))
+    (is (= content-cid (:cid rm)))))
+
+(deftest advertisement-refuses-missing-context-id
+  (is (= :invalid-context-id
+         (:error (ad/advertisement {:cid content-cid :peer peer :addrs retrieval
+                                    :entries [mh]})))))
+
+(deftest from-discover-does-not-swap-identity
+  (let [a (ad/from-discover rec {:context-id "pin:t1" :entries [mh]})]
+    (is (= content-cid (:cid a)))
+    (is (= peer (:provider a)))))
+
+;; ── announce message is advertisement CID, not content CID ────────────────
+
+(deftest announce-rejects-a-content-cid-passed-as-cid
+  (is (= :content-cid-is-not-an-advertisement
+         (:error (announce/message {:cid content-cid :addrs publisher}))))
+  (let [m (announce/message {:ad-cid "baguqeeraad" :addrs publisher})]
+    (is (= "baguqeeraad" (get-in m [:wire :cid])))
+    (is (= publisher (:addrs m)))))
+
+(deftest announce-refuses-empty-publisher-addrs
+  (is (= :empty-publisher-addrs
+         (:error (announce/message {:ad-cid "baguqeeraad" :addrs []})))))
+
+;; ── HTTP paths ────────────────────────────────────────────────────────────
+
+(deftest publisher-paths-are-ipni-v1
+  (is (= "/ipni/v1/ad/baguqeeraad" (http/ad-path "baguqeeraad")))
+  (is (= "/ipni/v1/head" (http/head-path)))
+  (is (= "https://ipfs.kotobase.net/ipni/v1/ad/baguqeeraad"
+         (http/ad-url "https://ipfs.kotobase.net" "baguqeeraad"))))
+
+(deftest production-announce-is-ingest
+  (is (= "https://cid.contact/ingest/announce"
+         (http/announce-url "https://cid.contact")))
+  (is (= "https://cid.contact/announce"
+         (http/announce-url "https://cid.contact" {:path "/announce"}))))
+
+(deftest providers-url-keeps-the-asked-cid
+  (is (= (str "https://cid.contact/routing/v1/providers/" content-cid)
+         (http/providers-url nil content-cid)))
+  (is (= (str "https://cid.contact/cid/" content-cid)
+         (http/cid-url nil content-cid))))
+
+;; ── HAMT is specified and not silently empty ──────────────────────────────
+
+(deftest hamt-as-set-is-not-an-empty-success
+  (let [r (hamt/as-set [mh])]
+    (is (false? (:ok? r)))
+    (is (= :not-yet-implemented (:error r)))))
+
+(deftest signed-head-requires-a-signer
+  (is (= :sign-fn-required (:error (head/signed-head {:ad-cid "baguqeeraad"}))))
+  (is (= "baguqeeraad"
+         (:ad-cid (head/signed-head {:ad-cid "baguqeeraad" :sign-fn (fn [x] x)})))))
+
+;; ── find: empty is not an outage ──────────────────────────────────────────
+
+(deftest get-providers-does-not-rewrite-cid
+  (let [http-fn (fn [{:keys [url]}]
+                  (is (re-find (re-pattern content-cid) url))
+                  {:status 200
+                   :body {:Providers [{:ID peer :Addrs retrieval}]}})
+        r (find/get-providers http-fn "https://cid.contact/routing/v1" content-cid)]
+    (is (true? (:ok? r)))
+    (is (= content-cid (:cid r)))
+    (is (= content-cid (:cid (first (:providers r)))))
+    (is (false? (:mutates-cid? (first (:providers r)))))))
+
+(deftest find-tells-empty-from-down
+  (let [empty (find/find-providers (constantly {:status 404}) content-cid
+                                   {:routers ["https://cid.contact/routing/v1"]})
+        down (find/find-providers (fn [_] (throw (ex-info "x" {}))) content-cid
+                                  {:routers ["https://cid.contact/routing/v1"]})]
+    (is (true? (:ok? empty)))
+    (is (= [] (:providers empty)))
+    (is (false? (:ok? down)))
+    (is (= :all-routers-failed (:reason down)))))
+
+(deftest get-cid-reads-native-provider-results
+  (let [http-fn (constantly {:status 200
+                             :body {:MultihashResults
+                                    [{:ProviderResults
+                                      [{:ContextID "pin:t1"
+                                        :Metadata [0xA0 0x12]
+                                        :Provider {:ID peer :Addrs retrieval}}]}]}})
+        r (find/get-cid http-fn "https://cid.contact" content-cid)]
+    (is (true? (:ok? r)))
+    (is (= "pin:t1" (:context-id (first (:providers r)))))
+    (is (= content-cid (:cid (first (:providers r)))))))
+
+;; ── advertise putter contract ─────────────────────────────────────────────
+
+(defn- hash-as [s] (fn [_] s))
+
+(deftest advertise-returns-the-content-cid
+  (let [stored (atom nil)
+        http-fn (fn [{:keys [url body]}]
+                  (is (= "https://cid.contact/ingest/announce" url))
+                  (is (= "baguqeeraad" (:cid body)))
+                  (is (not= content-cid (:cid body)))
+                  {:status 204})
+        r (advertise/advertise http-fn rec
+                               {:hash-fn (hash-as "baguqeeraad")
+                                :publisher-addrs publisher
+                                :context-id "pin:t1"
+                                :entries [mh]
+                                :put-fn (fn [b] (reset! stored b))})]
+    (is (true? (:ok? r)))
+    (is (= content-cid (:cid r)))
+    (is (= "baguqeeraad" (:ad-cid r)))
+    (is (false? (:mutates-cid? r)))
+    (is (= "baguqeeraad" (:cid @stored)))))
+
+(deftest advertise-missing-hash-fn-is-not-a-pass
+  (let [r (advertise/advertise (constantly {:status 204}) rec
+                               {:publisher-addrs publisher
+                                :context-id "pin:t1"
+                                :entries [mh]})]
+    (is (false? (:ok? r)))
+    (is (= :hash-fn-required (:reason r)))
+    (is (= content-cid (:cid r)))))
+
+(deftest advertise-rejection-is-not-a-pass
+  (let [r (advertise/advertise (constantly {:status 400 :body "need sig"}) rec
+                               {:hash-fn (hash-as "baguqeeraad")
+                                :publisher-addrs publisher
+                                :context-id "pin:t1"
+                                :entries [mh]})]
+    (is (false? (:ok? r)))
+    (is (= [] (:accepted r)))))
+
+(deftest advertise-any-indexer-accepting-is-enough
+  (let [http-fn (fn [{:keys [url]}]
+                  (if (re-find #"cid.contact" url)
+                    {:status 400}
+                    {:status 204}))
+        r (advertise/advertise http-fn rec
+                               {:hash-fn (hash-as "baguqeeraad")
+                                :publisher-addrs publisher
+                                :context-id "pin:t1"
+                                :entries [mh]
+                                :indexers ["https://cid.contact" "https://other.example"]})]
+    (is (true? (:ok? r)))
+    (is (= 1 (count (:accepted r))))))
