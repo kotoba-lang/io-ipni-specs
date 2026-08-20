@@ -31,6 +31,31 @@ ADR: `ADR-2608160300`.
 A record in this library does not change the content CID. Public identity
 stays `ipfs://{cid}`. IPNI never appears in that URI.
 
+## The announce wire form, measured
+
+Sent to production `https://cid.contact/ingest/announce` on 2026-08-20; the
+right column is what came back. All three shapes were wrong in this library
+before, and each fails as a bare HTTP 400 — a publisher recording only the
+status code would log `:rejected` and learn nothing.
+
+| sent | cid.contact answered |
+| --- | --- |
+| `{"cid": "bafk…"}` | `json: cannot unmarshal string into Go value of type struct { CidTarget string "json:\"/\"" }` |
+| `{"addrs": ["/dns4/host/tcp/443/https"]}` | `illegal base64 data at input byte 10` |
+| an address with no `/p2p/` | `invalid p2p multiaddr` |
+
+So `cid` is a dag-json link `{"/": "bafy…"}`, `addrs` are base64 of the
+**binary** multiaddr, and every publisher address must carry
+`/p2p/{peer-id}` — the indexer attributes a chain to a peer, not to a host.
+
+`addr-encode-fn` is injected (`multiformats.multiaddr/->octets` is one)
+because parsing a multiaddr needs a table this library does not depend on.
+Base64 is here, because the wire is what this namespace owns; it is checked
+against Node's encoder by a golden vector rather than against itself.
+
+**`/p2p/{peer-id}` means a publisher identity is required before anything
+can be announced.** That is not wired yet — see ADR-2608160300.
+
 ## Modules
 
 | ns | role |

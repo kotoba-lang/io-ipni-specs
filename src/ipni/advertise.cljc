@@ -21,6 +21,11 @@
   - `sign-fn` — optional. Unsigned is not a pass if the indexer 400s
   - `put-fn` — `(fn [{:keys [cid body kind]}] …)` store blocks. Optional
     when the publisher already has the bytes at `publisher-addrs`
+  - `addr-encode-fn` — `(fn [multiaddr-string] octets)`. REQUIRED: publisher
+    addresses go on the wire as base64 of the BINARY multiaddr, and parsing
+    one needs a multiformats table this library does not depend on. See
+    `ipni.announce`'s docstring for the three wire shapes measured against
+    production cid.contact
 
   This process is not an indexer node. Gossip ingest is out of scope."
   (:require [ipni.ad :as ad]
@@ -67,7 +72,7 @@
   `:entries` (multihashes) is required unless `:is-rm`.
   Missing hash-fn is `:hash-fn-required`, not a green unsigned skip."
   ([http-fn rec] (advertise http-fn rec {}))
-  ([http-fn rec {:keys [hash-fn encode-fn sign-fn put-fn
+  ([http-fn rec {:keys [hash-fn encode-fn sign-fn put-fn addr-encode-fn
                         publisher-addrs context-id is-rm previous-id
                         entries metadata indexers announce-path]
                  :or {indexers [http/default-indexer]
@@ -94,7 +99,9 @@
                ad-cid (hash-fn body)]
            (when put-fn
              (put-fn {:cid ad-cid :body body :kind :advertisement}))
-           (let [msg (announce/message {:ad-cid ad-cid :addrs publisher-addrs})]
+           (let [msg (announce/message {:ad-cid ad-cid
+                                        :addrs publisher-addrs
+                                        :addr-encode-fn addr-encode-fn})]
              (if (:error msg)
                {:ok? false :reason (:error msg) :cid (:cid rec)}
                (let [results (mapv #(put-announce http-fn
