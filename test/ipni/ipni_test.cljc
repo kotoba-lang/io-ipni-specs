@@ -1,5 +1,5 @@
 (ns ipni.ipni-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [ipni.ad :as ad]
             [ipni.advertise :as advertise]
             [ipni.announce :as announce]
@@ -12,7 +12,19 @@
 (def content-cid "bafkreicidcontent000000000000000000000000000000000000000")
 (def peer "12D3KooWproviderpeer")
 (def retrieval ["/dns4/ipfs.kotobase.net/tcp/443/https"])
-(def publisher ["/dns4/ipfs.kotobase.net/tcp/443/https"])
+(def publisher
+  "A PUBLISHER address: the ipni host, and carrying a peer.
+
+  It used to be `/dns4/ipfs.kotobase.net/tcp/443/https` -- the retrieval
+  gateway, with no `/p2p/`. That fixture was the exact mistake this
+  library's docstrings warn about, and cid.contact rejects it twice over
+  (`invalid p2p multiaddr`, and a chain that is not there)."
+  ["/dns4/ipni.kotobase.net/tcp/443/https/p2p/12D3KooWTestPublisherPeerId"])
+
+(defn- addr-bytes
+  "Stand-in for multiformats.multiaddr/->octets. The real encoder is
+  injected; these tests only need it to be deterministic."
+  [s] (mapv #(bit-and (int %) 0xFF) (seq s)))
 (def mh [0x12 0x20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
          17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32])
 
@@ -64,14 +76,56 @@
 
 (deftest announce-rejects-a-content-cid-passed-as-cid
   (is (= :content-cid-is-not-an-advertisement
-         (:error (announce/message {:cid content-cid :addrs publisher}))))
-  (let [m (announce/message {:ad-cid "baguqeeraad" :addrs publisher})]
-    (is (= "baguqeeraad" (get-in m [:wire :cid])))
+         (:error (announce/message {:cid content-cid :addrs publisher
+                                    :addr-encode-fn addr-bytes}))))
+  (let [m (announce/message {:ad-cid "baguqeeraad" :addrs publisher
+                             :addr-encode-fn addr-bytes})]
+    (is (= {"/" "baguqeeraad"} (get-in m [:wire :cid])))
     (is (= publisher (:addrs m)))))
 
 (deftest announce-refuses-empty-publisher-addrs
   (is (= :empty-publisher-addrs
-         (:error (announce/message {:ad-cid "baguqeeraad" :addrs []})))))
+         (:error (announce/message {:ad-cid "baguqeeraad" :addrs []
+                                    :addr-encode-fn addr-bytes})))))
+
+;; ── the wire form, as measured against production cid.contact 2026-08-20 ──
+;; Each of these was sent to https://cid.contact/ingest/announce and the
+;; quoted text is what came back. They are pinned because all three fail as
+;; a bare HTTP 400: a publisher that records only the status learns nothing.
+
+(deftest announce-cid-is-a-dag-json-link-not-a-string
+  ;; sent {"cid": "bafk…"} -> json: cannot unmarshal string into Go value
+  ;; of type struct { CidTarget string "json:\"/\"" }
+  (let [m (announce/message {:ad-cid "baguqeeraad" :addrs publisher
+                             :addr-encode-fn addr-bytes})]
+    (is (map? (get-in m [:wire :cid])))
+    (is (= "baguqeeraad" (get-in m [:wire :cid "/"])))
+    (is (not (string? (get-in m [:wire :cid]))))))
+
+(deftest announce-addrs-are-base64-of-binary-multiaddrs
+  ;; sent the text multiaddr -> illegal base64 data at input byte 10
+  (let [m (announce/message {:ad-cid "baguqeeraad" :addrs publisher
+                             :addr-encode-fn addr-bytes})
+        wire (first (get-in m [:wire :addrs]))]
+    (is (string? wire))
+    (is (re-matches #"[A-Za-z0-9+/]+=*" wire))
+    (is (not= (first publisher) wire) "the text form must not go on the wire")
+    (testing "base64 of exactly what addr-encode-fn returned"
+      (is (= wire (#'ipni.announce/b64 (addr-bytes (first publisher))))))))
+
+(deftest announce-requires-a-p2p-component
+  ;; sent /dns4/host/tcp/443/https -> invalid p2p multiaddr
+  (is (= :missing-p2p-component
+         (:error (announce/message {:ad-cid "baguqeeraad"
+                                    :addrs ["/dns4/ipni.kotobase.net/tcp/443/https"]
+                                    :addr-encode-fn addr-bytes}))))
+  (is (announce/p2p-component? (first publisher)))
+  (is (not (announce/p2p-component? "/dns4/ipni.kotobase.net/tcp/443/https"))))
+
+(deftest announce-without-an-addr-encoder-is-not-a-pass
+  (let [m (announce/message {:ad-cid "baguqeeraad" :addrs publisher})]
+    (is (= :addr-encode-fn-required (:error m)))
+    (is (nil? (:wire m)) "no wire map may escape without a real encoder")))
 
 ;; ── HTTP paths ────────────────────────────────────────────────────────────
 
@@ -148,12 +202,13 @@
   (let [stored (atom nil)
         http-fn (fn [{:keys [url body]}]
                   (is (= "https://cid.contact/ingest/announce" url))
-                  (is (= "baguqeeraad" (:cid body)))
-                  (is (not= content-cid (:cid body)))
+                  (is (= {"/" "baguqeeraad"} (:cid body)))
+                  (is (not= content-cid (get (:cid body) "/")))
                   {:status 204})
         r (advertise/advertise http-fn rec
                                {:hash-fn (hash-as "baguqeeraad")
                                 :publisher-addrs publisher
+                                :addr-encode-fn addr-bytes
                                 :context-id "pin:t1"
                                 :entries [mh]
                                 :put-fn (fn [b] (reset! stored b))})]
@@ -166,6 +221,7 @@
 (deftest advertise-missing-hash-fn-is-not-a-pass
   (let [r (advertise/advertise (constantly {:status 204}) rec
                                {:publisher-addrs publisher
+                                :addr-encode-fn addr-bytes
                                 :context-id "pin:t1"
                                 :entries [mh]})]
     (is (false? (:ok? r)))
@@ -176,6 +232,7 @@
   (let [r (advertise/advertise (constantly {:status 400 :body "need sig"}) rec
                                {:hash-fn (hash-as "baguqeeraad")
                                 :publisher-addrs publisher
+                                :addr-encode-fn addr-bytes
                                 :context-id "pin:t1"
                                 :entries [mh]})]
     (is (false? (:ok? r)))
@@ -189,8 +246,40 @@
         r (advertise/advertise http-fn rec
                                {:hash-fn (hash-as "baguqeeraad")
                                 :publisher-addrs publisher
+                                :addr-encode-fn addr-bytes
                                 :context-id "pin:t1"
                                 :entries [mh]
                                 :indexers ["https://cid.contact" "https://other.example"]})]
     (is (true? (:ok? r)))
     (is (= 1 (count (:accepted r))))))
+
+;; ── base64 golden vector ───────────────────────────────────────────────────
+;; This namespace hand-rolls base64 to stay dependency-free, so it is checked
+;; against a real encoder rather than against itself. The octets are the
+;; actual binary multiaddr for /dns4/ipni.kotobase.net/tcp/443/https, produced
+;; by multiformats.multiaddr/->octets; the expected string is what Node's
+;; Buffer.toString("base64") gave for those same bytes on 2026-08-20.
+;;
+;; A wrong encoder here is not a visible bug -- it is an HTTP 400 from
+;; cid.contact reading "illegal base64 data", which is what this whole
+;; namespace exists to stop producing.
+
+(def ^:private publisher-multiaddr-octets
+  [0x36 0x11 0x69 0x70 0x6e 0x69 0x2e 0x6b 0x6f 0x74 0x6f 0x62 0x61
+   0x73 0x65 0x2e 0x6e 0x65 0x74 0x06 0x01 0xbb 0xbb 0x03])
+
+(deftest base64-agrees-with-a-real-encoder
+  (let [m (announce/message {:ad-cid "baguqeeraad"
+                             :addrs publisher
+                             :addr-encode-fn (constantly publisher-multiaddr-octets)})]
+    (is (= "NhFpcG5pLmtvdG9iYXNlLm5ldAYBu7sD"
+           (first (get-in m [:wire :addrs])))))
+  (testing "padding: 1, 2 and 0 leftover bytes"
+    (let [b64 #(first (get-in (announce/message
+                               {:ad-cid "baguqeeraad" :addrs publisher
+                                :addr-encode-fn (constantly %)})
+                              [:wire :addrs]))]
+      (is (= "AA==" (b64 [0])))
+      (is (= "AAA=" (b64 [0 0])))
+      (is (= "AAAA" (b64 [0 0 0])))
+      (is (= "TWFu" (b64 [0x4d 0x61 0x6e]))))))
