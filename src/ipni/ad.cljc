@@ -11,14 +11,10 @@
   Signature bytes are `sign-fn` of the unsigned advertisement. There is
   no default sign-fn. An indexer that requires a signature will 400 —
   that is a failure, not a silent pass."
-  (:require [ipni.metadata :as metadata]))
+  (:require [ipni.metadata :as metadata]
+            [ipni.octets :as oct]))
 
-(defn- octets [x]
-  (cond
-    (nil? x) []
-    (string? x) (mapv #(bit-and (int %) 0xFF) (seq x))
-    (sequential? x) (mapv #(bit-and % 0xFF) x)
-    :else :invalid))
+(def ^:private octets oct/->octets)
 
 (defn entry-chunk
   "One EntryChunk. `entries` are multihashes (octet vectors), not CIDs.

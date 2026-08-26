@@ -14,7 +14,8 @@
   failing means our bytes are not go-libipni's bytes."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [ipni.sign :as sign]))
+            [ipni.sign :as sign]
+            #?(:cljs ["crypto" :as node-crypto])))
 
 ;; ── the fixture ─────────────────────────────────────────────────────────────
 
@@ -29,8 +30,11 @@
        "FoGSzINfDg"))
 
 ;; ── host services the library does not own ──────────────────────────────────
-;; Deliberately NOT reader-conditional fallbacks that return nil. A test that
-;; cannot compute a hash must fail, not report that nothing was wrong.
+;; Real on BOTH runtimes, not a JVM implementation beside a cljs throw. This
+;; suite ran only on the JVM until 2026-08-26, and what it did not see was
+;; `(int c)` returning 0 on ClojureScript for every character -- which made
+;; the signed payload-type a run of NUL bytes. A signature is exactly the
+;; kind of thing whose failure is invisible until a remote party rejects it.
 
 (def base32-alphabet "abcdefghijklmnopqrstuvwxyz234567")
 
@@ -55,8 +59,9 @@
   #?(:clj (vec (map #(bit-and % 0xFF)
                     (.digest (java.security.MessageDigest/getInstance "SHA-256")
                              (byte-array (map unchecked-byte octets)))))
-     :cljs (throw (js/Error. (str "this suite needs a real SHA-256; it must not skip, "
-                                  (count octets) " bytes unhashed")))))
+     :cljs (vec (.from js/Array
+                       (.digest (.update (.createHash node-crypto "sha256")
+                                         (js/Buffer.from (into-array octets))))))))
 
 (defn multihash-sha256 [octets]
   (vec (concat [0x12 0x20] (sha256 octets))))
@@ -65,25 +70,29 @@
   #?(:clj (vec (map #(bit-and % 0xFF)
                     (.decode (java.util.Base64/getDecoder)
                              (-> s (str/replace "-" "+") (str/replace "_" "/")
-                                 (as-> t (str t (case (mod (count t) 4) 2 "==" 3 "=" ""))))))) 
-     :cljs (throw (js/Error. (str "this suite needs a real base64 decoder, " (count s) " chars undecoded")))))
+                                 (as-> t (str t (case (mod (count t) 4) 2 "==" 3 "=" "")))))))
+     :cljs (vec (.from js/Array (js/Buffer.from s "base64")))))
 
 (defn ed25519-verify
-  "SPKI-wrap the raw key so JCA will take it, then verify."
+  "SPKI-wrap the raw key so the host will take it, then verify."
   [pubkey message signature]
-  #?(:clj
-     (let [spki (byte-array (map unchecked-byte
-                                 (concat [0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00]
-                                         pubkey)))
-           kf (java.security.KeyFactory/getInstance "Ed25519")
-           pk (.generatePublic kf (java.security.spec.X509EncodedKeySpec. spki))
-           sig (java.security.Signature/getInstance "Ed25519")]
-       (.initVerify sig pk)
-       (.update sig (byte-array (map unchecked-byte message)))
-       (.verify sig (byte-array (map unchecked-byte signature))))
-     :cljs (throw (js/Error. (str "this suite needs a real Ed25519 verifier for a "
-                                  (count pubkey) "-byte key, " (count message) " bytes, "
-                                  (count signature) "-byte signature")))))
+  (let [spki (concat [0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00] pubkey)]
+    #?(:clj
+       (let [kf (java.security.KeyFactory/getInstance "Ed25519")
+             pk (.generatePublic kf (java.security.spec.X509EncodedKeySpec.
+                                     (byte-array (map unchecked-byte spki))))
+             sig (java.security.Signature/getInstance "Ed25519")]
+         (.initVerify sig pk)
+         (.update sig (byte-array (map unchecked-byte message)))
+         (.verify sig (byte-array (map unchecked-byte signature))))
+       :cljs
+       (let [key (.createPublicKey node-crypto
+                                   #js {:key (js/Buffer.from (into-array spki))
+                                        :format "der" :type "spki"})]
+         (.verify node-crypto nil
+                  (js/Buffer.from (into-array message))
+                  key
+                  (js/Buffer.from (into-array signature)))))))
 
 ;; ── the assertions ──────────────────────────────────────────────────────────
 
