@@ -24,7 +24,8 @@
   No crypto here, same rule as the rest of the library: `hash-fn`,
   `sign-fn` and `verify-fn` are injected. A missing one is an error, not
   an unsigned pass."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [ipni.octets :as oct]))
 
 (def ^:const domain
   "The libp2p signing domain for every indexer record. Domain separation
@@ -42,21 +43,7 @@
   provider signature."
   "/indexer/ingest/extendedProviderSignature")
 
-(defn- octets [x]
-  (cond
-    (nil? x) []
-    (string? x) (vec (mapcat (fn [c]
-                               (let [n (int c)]
-                                 (cond
-                                   (< n 0x80) [n]
-                                   (< n 0x800) [(bit-or 0xC0 (bit-shift-right n 6))
-                                                (bit-or 0x80 (bit-and n 0x3F))]
-                                   :else [(bit-or 0xE0 (bit-shift-right n 12))
-                                          (bit-or 0x80 (bit-and (bit-shift-right n 6) 0x3F))
-                                          (bit-or 0x80 (bit-and n 0x3F))])))
-                             (seq x)))
-    (sequential? x) (mapv #(bit-and % 0xFF) x)
-    :else :invalid))
+(def ^:private octets oct/->octets)
 
 (defn uvarint
   "Unsigned LEB128. Present here rather than borrowed from `ipni.metadata`

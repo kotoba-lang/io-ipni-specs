@@ -29,16 +29,14 @@
 
   This process is not an indexer node. Gossip ingest is out of scope."
   (:require [ipni.ad :as ad]
+            [ipni.octets :as oct]
             [ipni.announce :as announce]
             [ipni.http :as http]
             [ipni.metadata :as metadata]))
 
 (defn- ->octets [b]
-  (cond
-    (nil? b) nil
-    (vector? b) b
-    (string? b) (mapv #(bit-and (int %) 0xFF) (seq b))
-    :else (mapv #(bit-and % 0xFF) (vec (seq #?(:clj b :cljs (array-seq b)))))))
+  (let [o (oct/->octets b)]
+    (if (= :invalid o) nil o)))
 
 (defn put-announce
   "PUT the announce message to one indexer. Never throws. Never rewrites
