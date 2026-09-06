@@ -43,6 +43,58 @@
   (is (= :empty (:error (metadata/decode []))))
   (is (= :negative (:error (metadata/uvarint-encode -1)))))
 
+;; ── IPQ: the selection transport, in the private-use area ─────────────────
+
+(deftest ipq-code-sits-inside-the-multicodec-private-use-area
+  ;; multicodec README, Reserved Code Ranges: 0x300000-0x3FFFFF is
+  ;; "reserved for internal use by applications and will never be assigned any
+  ;; meaning as part of the Multicodec specification". A code outside it that
+  ;; the table does not carry is squatting, not a private extension.
+  (is (<= 0x300000 metadata/ipq-selection-http 0x3FFFFF))
+  ;; and the slot a registration would ask for is in the transport family,
+  ;; which is spaced by 0x10 from 0x0900.
+  (is (= 0x0940 metadata/ipq-selection-http-registration-request))
+  (is (zero? (mod metadata/ipq-selection-http-registration-request 0x10)))
+  (is (= metadata/ipq-selection-http-registration-request
+         (- metadata/ipq-selection-http 0x300000))))
+
+(deftest ipq-metadata-is-the-identifier-then-the-profile
+  ;; Pinned as bytes, not recomputed from the constants: recomputing asserts
+  ;; that uvarint-encode is self-consistent, which is not the claim. The claim
+  ;; is that THESE bytes go on the wire, so changing the code has to change
+  ;; this line.
+  (is (= [0xC0 0x92 0xC0 0x01 0x01] (metadata/ipq-selection-http-bytes)))
+  (let [d (metadata/decode (metadata/ipq-selection-http-bytes))]
+    (is (= metadata/ipq-selection-http (:protocol d)))
+    (is (= "transport-ipq-selection-http" (:name d)))
+    (is (= [0x01] (:extra d)))))
+
+(deftest read-ipq-keeps-three-answers-apart
+  (testing "ours, at a profile we implement"
+    (let [r (metadata/read-ipq (metadata/ipq-selection-http-bytes))]
+      (is (true? (:ok? r)))
+      (is (= 1 (:profile r)))))
+  (testing "another transport is :not-ipq, and says which"
+    (let [r (metadata/read-ipq (metadata/gateway-http-bytes))]
+      (is (false? (:ok? r)))
+      (is (= :not-ipq (:reason r)))
+      (is (= metadata/gateway-http (:protocol r)))))
+  (testing "our identifier with nothing after it is not profile 0"
+    (let [r (metadata/read-ipq (metadata/encode metadata/ipq-selection-http))]
+      (is (false? (:ok? r)))
+      (is (= :profile-missing (:reason r)))))
+  (testing "a newer profile is NOT the same answer as a different transport"
+    ;; This is the distinction the missing `ipq?` predicate would have erased.
+    ;; :not-ipq means route elsewhere. :profile-unsupported means this IS an
+    ;; IPQ provider and we are the ones behind.
+    (let [r (metadata/read-ipq (metadata/ipq-selection-http-bytes 99))]
+      (is (false? (:ok? r)))
+      (is (= :profile-unsupported (:reason r)))
+      (is (= 99 (:profile r)))
+      (is (not= :not-ipq (:reason r)))))
+  (testing "empty metadata is not IPQ and not protocol zero"
+    (is (= :not-ipq (:reason (metadata/read-ipq []))))))
+
 ;; ── advertisement does not rewrite the content CID ────────────────────────
 
 (deftest advertisement-keeps-the-content-cid
