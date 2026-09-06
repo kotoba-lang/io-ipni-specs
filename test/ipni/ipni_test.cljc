@@ -32,8 +32,13 @@
 
 ;; ── metadata ──────────────────────────────────────────────────────────────
 
-(deftest gateway-http-is-0x0920-as-uvarint
-  (is (= [0xA0 0x12] (metadata/gateway-http-bytes)))
+(deftest gateway-http-carries-a-zero-length-payload
+  ;; Two bytes was this library's answer until 2026-09-06 and it is the one
+  ;; IPNI.md's prose implies ("no following metadata"). go-libipni v0.8.2 --
+  ;; what the indexers run -- rejects it: `expected 3 readable bytes but read
+  ;; 2`. Its `ipfsGatewayHttpBytes` is the identifier plus varint(0), so the
+  ;; payload is empty and its LENGTH is still on the wire.
+  (is (= [0xA0 0x12 0x00] (metadata/gateway-http-bytes)))
   (is (metadata/gateway-http? (metadata/gateway-http-bytes)))
   (is (= 0x0920 (:protocol (metadata/decode (metadata/gateway-http-bytes)))))
   (is (= "transport-ipfs-gateway-http"
@@ -51,49 +56,121 @@
   ;; meaning as part of the Multicodec specification". A code outside it that
   ;; the table does not carry is squatting, not a private extension.
   (is (<= 0x300000 metadata/ipq-selection-http 0x3FFFFF))
-  ;; and the slot a registration would ask for is in the transport family,
-  ;; which is spaced by 0x10 from 0x0900.
   (is (= 0x0940 metadata/ipq-selection-http-registration-request))
   (is (zero? (mod metadata/ipq-selection-http-registration-request 0x10)))
   (is (= metadata/ipq-selection-http-registration-request
          (- metadata/ipq-selection-http 0x300000))))
 
-(deftest ipq-metadata-is-the-identifier-then-the-profile
+(deftest ipq-metadata-is-identifier-length-then-profile
   ;; Pinned as bytes, not recomputed from the constants: recomputing asserts
-  ;; that uvarint-encode is self-consistent, which is not the claim. The claim
-  ;; is that THESE bytes go on the wire, so changing the code has to change
-  ;; this line.
-  (is (= [0xC0 0x92 0xC0 0x01 0x01] (metadata/ipq-selection-http-bytes)))
-  (let [d (metadata/decode (metadata/ipq-selection-http-bytes))]
-    (is (= metadata/ipq-selection-http (:protocol d)))
-    (is (= "transport-ipq-selection-http" (:name d)))
-    (is (= [0x01] (:extra d)))))
+  ;; that the encoder is self-consistent, which is not the claim. The claim is
+  ;; that THESE bytes go on the wire, and they were measured -- go-libipni
+  ;; accepts `a01200c092c0010101` and remarshals it byte-identically, and
+  ;; rejects the same thing without the length byte with EOF.
+  (is (= [0xC0 0x92 0xC0 0x01 0x01 0x01] (metadata/ipq-selection-http-bytes)))
+  (let [d (metadata/decode-sequence (metadata/ipq-selection-http-bytes))]
+    (is (true? (:ok? d)))
+    (is (= [metadata/ipq-selection-http] (mapv :protocol (:entries d))))
+    (is (= [[1]] (mapv :payload (:entries d))))))
 
-(deftest read-ipq-keeps-three-answers-apart
-  (testing "ours, at a profile we implement"
+(deftest the-metadata-kotobase-should-publish
+  (is (= [0xA0 0x12 0x00 0xC0 0x92 0xC0 0x01 0x01 0x01]
+         (metadata/kotobase-metadata-bytes)))
+  (let [d (metadata/decode-sequence (metadata/kotobase-metadata-bytes))]
+    (is (true? (:ok? d)))
+    (is (= [metadata/gateway-http metadata/ipq-selection-http]
+           (mapv :protocol (:entries d))))
+    (is (true? (:ordered? d)) "0x0920 < 0x300940, the order the spec asks for")
+    (is (= [[] [1]] (mapv :payload (:entries d))))))
+
+(deftest the-metadata-kotobase-publishes-today-is-well-formed
+  ;; Measured 2026-09-06 on the live advertisement `bafyreiaupk64…`: A0 12 00.
+  ;; This test asserted the OPPOSITE when it was first written -- that the third
+  ;; byte was a stray, because IPNI.md says the gateway has "no following
+  ;; metadata". go-libipni settled it: A0 12 00 is accepted and A0 12 is not.
+  ;; The prose describes the payload; the wire also carries its length.
+  (let [live [0xA0 0x12 0x00]
+        d (metadata/decode-sequence live)]
+    (is (true? (:ok? d)))
+    (is (= [metadata/gateway-http] (mapv :protocol (:entries d))))
+    (is (= [[]] (mapv :payload (:entries d))))
+    (is (= live (metadata/gateway-http-bytes))
+        "and this library now agrees with the wire instead of with the prose"))
+  (is (= :not-ipq (:reason (metadata/read-ipq [0xA0 0x12 0x00])))
+      "IPQ is genuinely absent from it — an answer, not a parse failure"))
+
+(deftest read-ipq-keeps-four-answers-apart
+  (testing "ours alone, at a profile we implement"
     (let [r (metadata/read-ipq (metadata/ipq-selection-http-bytes))]
       (is (true? (:ok? r)))
       (is (= 1 (:profile r)))))
-  (testing "another transport is :not-ipq, and says which"
+  (testing "ours ALONGSIDE the gateway — the shape that goes on the wire"
+    ;; Reading only the first entry cannot find IPQ here, which is what this
+    ;; function did when it landed. One transport is the easy case; two is the
+    ;; case the spec exists for.
+    (let [r (metadata/read-ipq (metadata/kotobase-metadata-bytes))]
+      (is (true? (:ok? r)))
+      (is (= 1 (:profile r)))))
+  (testing "another transport is :not-ipq, and says what it did find"
     (let [r (metadata/read-ipq (metadata/gateway-http-bytes))]
       (is (false? (:ok? r)))
       (is (= :not-ipq (:reason r)))
-      (is (= metadata/gateway-http (:protocol r)))))
-  (testing "our identifier with nothing after it is not profile 0"
-    (let [r (metadata/read-ipq (metadata/encode metadata/ipq-selection-http))]
-      (is (false? (:ok? r)))
-      (is (= :profile-missing (:reason r)))))
+      (is (= [metadata/gateway-http] (:protocols r)))))
   (testing "a newer profile is NOT the same answer as a different transport"
-    ;; This is the distinction the missing `ipq?` predicate would have erased.
-    ;; :not-ipq means route elsewhere. :profile-unsupported means this IS an
-    ;; IPQ provider and we are the ones behind.
     (let [r (metadata/read-ipq (metadata/ipq-selection-http-bytes 99))]
       (is (false? (:ok? r)))
       (is (= :profile-unsupported (:reason r)))
       (is (= 99 (:profile r)))
       (is (not= :not-ipq (:reason r)))))
-  (testing "empty metadata is not IPQ and not protocol zero"
-    (is (= :not-ipq (:reason (metadata/read-ipq []))))))
+  (testing "could not be read is NOT the same answer as read and IPQ is absent"
+    (is (= :undecodable (:reason (metadata/read-ipq []))))
+    (is (= :undecodable (:reason (metadata/read-ipq [0xC0 0x92 0xC0 0x01])))
+        "our identifier with no length after it is truncated, not profile 0")
+    (is (not= :not-ipq (:reason (metadata/read-ipq []))))))
+
+(deftest bitswap-is-unframed-and-cannot-be-concatenated
+  ;; The exception, and it is in the reference itself: `bitswapBytes` is the
+  ;; bare identifier with no length, so nothing can follow it. Measured:
+  ;; go-libipni rejects `801200a01200`. Refusing to emit it is better than
+  ;; emitting bytes we know an indexer will not read.
+  (is (= [0x80 0x12] (metadata/entry-bytes metadata/bitswap)))
+  (let [d (metadata/decode-sequence (metadata/entry-bytes metadata/bitswap))]
+    (is (false? (:ok? d)))
+    (is (= :unframed (:reason d))))
+  (let [r (metadata/encode-sequence [{:protocol metadata/bitswap :payload []}
+                                     {:protocol metadata/gateway-http :payload []}])]
+    (is (= :unframed-in-sequence (:error r)))))
+
+(deftest a-truncated-payload-is-refused-not-shortened
+  (let [truncated (into (metadata/gateway-http-bytes)
+                        [0xC0 0x92 0xC0 0x01 0x04 0x01])   ; declares 4, carries 1
+        d (metadata/decode-sequence truncated)]
+    (is (false? (:ok? d)))
+    (is (= :truncated (:reason d)))
+    (is (= metadata/ipq-selection-http (:protocol d)))
+    (is (= [metadata/gateway-http] (mapv :protocol (:entries d)))
+        "the entry before it read fine — the answer is still refused")))
+
+(deftest writing-is-strict-about-order-where-reading-is-not
+  (testing "encode refuses to reorder for the caller"
+    (is (= :out-of-order
+           (:error (metadata/encode-sequence
+                    [{:protocol metadata/ipq-selection-http :payload [1]}
+                     {:protocol metadata/gateway-http :payload []}])))))
+  (testing "and refuses a protocol announced twice"
+    (is (= :duplicate-protocol
+           (:error (metadata/encode-sequence
+                    [{:protocol metadata/gateway-http :payload []}
+                     {:protocol metadata/gateway-http :payload []}])))))
+  (testing "reading reports the order instead of rejecting it"
+    ;; go-libipni accepts unordered input and sorts it on remarshal, so
+    ;; refusing here would reject data that is live somewhere.
+    (let [unordered (into (metadata/ipq-selection-http-bytes)
+                          (metadata/gateway-http-bytes))
+          d (metadata/decode-sequence unordered)]
+      (is (true? (:ok? d)))
+      (is (false? (:ordered? d)))
+      (is (true? (:ok? (metadata/read-ipq unordered)))))))
 
 ;; ── advertisement does not rewrite the content CID ────────────────────────
 
@@ -103,7 +180,9 @@
     (is (= content-cid (:cid a)))
     (is (false? (:mutates-cid? a)))
     (is (= :ipni.advertisement (:schema a)))
-    (is (= [0xA0 0x12] (:metadata a)))))
+    ;; three bytes since 2026-09-06: identifier, zero length, no payload.
+    ;; go-libipni rejects the two-byte form this line used to pin.
+    (is (= [0xA0 0x12 0x00] (:metadata a)))))
 
 (deftest advertisement-refuses-empty-entries-unless-rm
   (is (= :empty-entries

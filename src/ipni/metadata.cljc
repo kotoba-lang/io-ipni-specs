@@ -112,53 +112,192 @@
        :name (get protocol-name (:value r))
        :extra (:rest r)})))
 
+(declare entry-bytes)
+
 (defn gateway-http-bytes
-  "Metadata kotobase advertisements carry. Retrieval is HTTPS gateway,
-  not Bitswap."
+  "One trustless-gateway entry: the identifier and a payload length of zero.
+
+  This used to be two bytes, matching IPNI.md's prose. Measured 2026-09-06,
+  go-libipni v0.8.2 REJECTS two bytes -- `expected 3 readable bytes but read 2`
+  -- because its `ipfsGatewayHttpBytes` is the identifier plus `varint(0)`. The
+  live advertisement has always carried three; it was this function that was
+  wrong, and only harmlessly so because `ipni-drain` publishes, not this."
   []
-  (encode gateway-http))
+  (entry-bytes gateway-http []))
 
 (defn gateway-http?
   [octets]
   (= gateway-http (:protocol (decode octets))))
 
+
+;; ── one Metadata field, several protocols ────────────────────────────────────
+;;
+;; IPNI.md says: "metadata begins with a uvarint identifying the protocol,
+;; followed by protocol-specific metadata. This may be repeated for additional
+;; supported protocols. Specified protocols are expected to be ordered in
+;; increasing order."
+;;
+;; That prose is not the wire format. Measured 2026-09-06 against go-libipni
+;; v0.8.2 -- the reference implementation the indexers run -- the framing is
+;;
+;;     uvarint(protocol) ++ uvarint(payload-length) ++ payload
+;;
+;; and the spec's "no following metadata" is a payload of length ZERO, not an
+;; absent length. The consequences are not cosmetic:
+;;
+;;   a012                 REJECTED  "expected 3 readable bytes but read 2"
+;;   a01200               accepted  (this is what kotobase publishes today)
+;;   a01200c092c00101     REJECTED  EOF -- a protocol with no length prefix
+;;   a01200c092c0010101   accepted  [transport-ipfs-gateway-http Code(3148096)]
+;;                                  and remarshals byte-identically
+;;
+;; So the third byte in the live advertisement is correct and this namespace's
+;; earlier two-byte `gateway-http-bytes` was the wrong one -- it produced bytes
+;; the reference rejects, and was harmless only because the publisher that
+;; actually publishes is `ipni-drain`, which hardcoded the right ones.
+;;
+;; Bitswap is the exception, in the reference itself: `bitswapBytes` is the bare
+;; identifier with no length. That is why bitswap cannot be concatenated with
+;; anything, and why `encode-sequence` refuses to try.
+
+(def length-prefixed?
+  "Whether a protocol's entry carries a uvarint payload length.
+
+  Everything in go-libipni does except bitswap. `Unknown` -- which is how a
+  code the reference has never seen is parsed, and therefore how IPQ is parsed
+  -- reads code, then length, then that many bytes. A private-use protocol that
+  omits the length ends the reference's parse at EOF."
+  (fn [protocol] (not= bitswap protocol)))
+
+(defn entry-bytes
+  "One `uvarint(protocol) ++ uvarint(len) ++ payload` entry."
+  ([protocol] (entry-bytes protocol []))
+  ([protocol payload]
+   (let [head (uvarint-encode protocol)
+         body (mapv #(bit-and % 0xFF) (or payload []))]
+     (cond
+       (:error head) head
+       (not (length-prefixed? protocol)) (into head body)
+       :else
+       (let [len (uvarint-encode (count body))]
+         (if (:error len) len (into (into head len) body)))))))
+
+(defn decode-sequence
+  "Every protocol in one Metadata field.
+
+  Returns `{:ok? true :entries [{:protocol :name :payload} ...] :ordered? bool}`
+  or `{:ok? false :reason ...}`:
+
+      :empty      no bytes. Silence is not \"no protocols\": IPNI.md gives an
+                  advertisement with no Metadata its own meaning, an address update
+      :truncated  an identifier, a length, or a declared payload runs past the end
+      :unframed   a bitswap entry in a sequence. The reference cannot read past
+                  one either, so this refuses rather than return a prefix
+
+  `:ordered?` reports the spec's increasing-order expectation rather than
+  enforcing it -- the reference accepts unordered input and sorts it on
+  remarshal, so refusing here would reject data that is live somewhere.
+  `encode-sequence` is where we are strict, because that is the half we own."
+  [octets]
+  (let [xs (vec octets)]
+    (if (empty? xs)
+      {:ok? false :reason :empty}
+      (loop [rest-bytes xs entries []]
+        (if (empty? rest-bytes)
+          {:ok? true :entries entries
+           :ordered? (= (mapv :protocol entries) (sort (mapv :protocol entries)))}
+          (let [h (uvarint-decode rest-bytes)]
+            (if (:error h)
+              {:ok? false :reason :truncated :detail (:error h) :entries entries}
+              (let [proto (:value h)]
+                (if-not (length-prefixed? proto)
+                  {:ok? false :reason :unframed :protocol proto
+                   :name (get protocol-name proto) :entries entries}
+                  (let [l (uvarint-decode (:rest h))]
+                    (if (:error l)
+                      {:ok? false :reason :truncated :protocol proto
+                       :detail (:error l) :entries entries}
+                      (let [n (:value l) body (vec (:rest l))]
+                        (if (< (count body) n)
+                          {:ok? false :reason :truncated :protocol proto
+                           :detail :payload :entries entries}
+                          (recur (subvec body n)
+                                 (conj entries {:protocol proto
+                                                :name (get protocol-name proto)
+                                                :payload (subvec body 0 n)})))))))))))))))
+
+(defn encode-sequence
+  "Metadata bytes for several protocols, in increasing protocol order.
+
+  Refuses rather than reorders. The reference sorts on remarshal, so a caller
+  who believes their order means something should hear about it here rather
+  than discover it changed on the wire."
+  [entries]
+  (let [protos (mapv :protocol entries)]
+    (cond
+      (empty? entries) {:error :empty}
+      (not= protos (sort protos)) {:error :out-of-order :protocols protos}
+      (not= (count protos) (count (distinct protos))) {:error :duplicate-protocol
+                                                       :protocols protos}
+      (and (> (count protos) 1) (some #(not (length-prefixed? %)) protos))
+      {:error :unframed-in-sequence :protocols protos}
+      :else
+      (reduce (fn [acc {:keys [protocol payload]}]
+                (if (:error acc)
+                  acc
+                  (let [e (entry-bytes protocol payload)]
+                    (if (:error e) e (into acc e)))))
+              []
+              entries))))
+
 (defn ipq-selection-http-bytes
-  "Metadata for an IPQ selection endpoint: protocol identifier, then one
-  uvarint profile number. Nothing else -- the endpoint's own budgets are read
-  from the endpoint, not guessed from an advertisement that may be days old."
+  "IPQ metadata: the identifier, a payload length of one, and the profile."
   ([] (ipq-selection-http-bytes ipq-selection-profile))
+  ([profile] (entry-bytes ipq-selection-http [profile])))
+
+(defn kotobase-metadata-bytes
+  "What a kotobase advertisement carries: the trustless gateway, then IPQ.
+
+  0x0920 < 0x300940, which is already the increasing order the spec asks for
+  and the order the reference remarshals into."
+  ([] (kotobase-metadata-bytes ipq-selection-profile))
   ([profile]
-   (let [head (uvarint-encode ipq-selection-http)]
-     (if (:error head)
-       head
-       (let [tail (uvarint-encode profile)]
-         (if (:error tail) tail (into head tail)))))))
+   (encode-sequence [{:protocol gateway-http :payload []}
+                     {:protocol ipq-selection-http :payload [profile]}])))
 
 (defn read-ipq
-  "Read IPQ metadata, keeping three answers apart that a predicate would fuse.
+  "Find IPQ in a Metadata field, keeping four answers apart that a predicate
+  would fuse.
 
   Returns `{:ok? true :protocol :profile}`, or `{:ok? false :reason ...}` with
 
-      :not-ipq              some other transport, or undecodable
-      :profile-missing      our identifier with no profile number after it
+      :not-ipq              decodable, and IPQ is not among the protocols
+      :undecodable          the Metadata could not be parsed at all, so the
+                            question was never answered. NOT the same as
+                            :not-ipq, which is an answer
+      :profile-missing      our identifier with an empty payload
       :profile-unsupported  our identifier, a profile we do not implement
 
-  There is deliberately no `ipq?` predicate. A boolean makes the third case
-  read as the first, and those are opposite instructions: `:not-ipq` means
-  route elsewhere, `:profile-unsupported` means this provider speaks a newer
-  IPQ than we do and a caller that treats it as \"not IPQ\" will never notice
-  the version it is failing to keep up with."
+  There is deliberately no `ipq?` predicate. A boolean makes the last case read
+  as the first, and those are opposite instructions: `:not-ipq` means route
+  elsewhere, `:profile-unsupported` means this provider speaks a newer IPQ than
+  we do and a caller that treats it as \"not IPQ\" will never notice the version
+  it is failing to keep up with.
+
+  This SCANS the sequence. Reading only the first entry cannot find IPQ in the
+  one shape that matters -- a provider announcing the gateway and IPQ together."
   [octets]
-  (let [d (decode octets)]
-    (cond
-      (:error d) {:ok? false :reason :not-ipq :detail (:error d)}
-      (not= ipq-selection-http (:protocol d)) {:ok? false :reason :not-ipq
-                                               :protocol (:protocol d)}
-      :else
-      (let [p (uvarint-decode (:extra d))]
-        (cond
-          (:error p) {:ok? false :reason :profile-missing :detail (:error p)}
-          (not (contains? supported-ipq-profiles (:value p)))
-          {:ok? false :reason :profile-unsupported :profile (:value p)
-           :supported supported-ipq-profiles}
-          :else {:ok? true :protocol ipq-selection-http :profile (:value p)})))))
+  (let [seq-result (decode-sequence octets)]
+    (if-not (:ok? seq-result)
+      {:ok? false :reason :undecodable :detail (:reason seq-result)}
+      (if-let [entry (first (filter #(= ipq-selection-http (:protocol %))
+                                    (:entries seq-result)))]
+        (let [profile (first (:payload entry))]
+          (cond
+            (nil? profile) {:ok? false :reason :profile-missing}
+            (not (contains? supported-ipq-profiles profile))
+            {:ok? false :reason :profile-unsupported :profile profile
+             :supported supported-ipq-profiles}
+            :else {:ok? true :protocol ipq-selection-http :profile profile}))
+        {:ok? false :reason :not-ipq
+         :protocols (mapv :protocol (:entries seq-result))}))))
