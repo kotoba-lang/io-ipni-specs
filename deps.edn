@@ -2,7 +2,12 @@
  ;; Advertisement IPLD is a logical value here. dag-cbor encode, CID hash,
  ;; HTTP, JSON, signatures and clocks are injected. This library holds no
  ;; crypto, no socket and no clock — same seam as kad.routing.
- :deps {}
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       }
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

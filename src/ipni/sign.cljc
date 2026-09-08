@@ -24,7 +24,7 @@
   No crypto here, same rule as the rest of the library: `hash-fn`,
   `sign-fn` and `verify-fn` are injected. A missing one is an error, not
   an unsigned pass."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [ipni.octets :as oct]))
 
 (def ^:const domain
