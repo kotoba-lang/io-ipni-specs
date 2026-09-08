@@ -12,7 +12,7 @@
   advertisement's fields must equal the payload inside their envelope, and
   their signature must verify over the record this code frames. Either one
   failing means our bytes are not go-libipni's bytes."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [ipni.sign :as sign]
             #?(:cljs ["crypto" :as node-crypto])))

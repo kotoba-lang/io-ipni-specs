@@ -15,7 +15,7 @@
   cid.contact serves ingest at `/ingest/announce`. Both are paths, not
   identities. Default announce URL is the production ingest endpoint so
   a first call is not a 404 dressed as a pass."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def ^:const default-indexer "https://cid.contact")
 (def ^:const default-routing-v1 "https://cid.contact/routing/v1")
