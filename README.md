@@ -120,6 +120,6 @@ pass. Override `:path` if you are talking to a spec-shaped indexer.
 ## Tests
 
 ```bash
-clojure -M:test
-clojure -M:lint
+kbb -M:test
+kbb -M:lint
 ```
