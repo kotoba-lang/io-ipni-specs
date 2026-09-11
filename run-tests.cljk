@@ -11,7 +11,7 @@
    A `.cljc` test belongs in BOTH lists below. Being required is not being
    run.
 
-     nbb --classpath \"$(clojure -Spath -A:test)\" run-tests.cljs"
+     nbb --classpath \"$(clojure -Spath -A:test)\" run-tests.cljk"
   (:require [cljs.test :as t]
             [ipni.ipni-test]
             [ipni.sign-test]))
