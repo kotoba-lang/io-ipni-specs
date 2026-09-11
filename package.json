@@ -2,6 +2,6 @@
   "name": "io-ipni-specs",
   "private": true,
   "scripts": {
-    "test:nbb": "nbb --classpath \"$(clojure -Spath -A:test)\" run-tests.cljk"
+    "test:nbb": "kbb --backend sci --classpath \"$(kbb -Spath -A:test)\" run-tests.cljk"
   }
 }
