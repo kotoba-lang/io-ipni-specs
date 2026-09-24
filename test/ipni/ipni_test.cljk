@@ -1,5 +1,5 @@
 (ns ipni.ipni-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [ipni.ad :as ad]
             [ipni.advertise :as advertise]
             [ipni.announce :as announce]

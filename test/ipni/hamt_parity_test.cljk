@@ -13,7 +13,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [ipni.hamt :as hamt]))
 
 (defn repo-root
