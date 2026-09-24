@@ -13,7 +13,7 @@
   their signature must verify over the record this code frames. Either one
   failing means our bytes are not go-libipni's bytes."
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [ipni.sign :as sign]
             #?(:cljs ["crypto" :as node-crypto])))
 
