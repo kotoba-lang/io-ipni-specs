@@ -10,7 +10,7 @@
    Clojure original on the same call.
 
    Set AMU_BIN to override the compiler location."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
