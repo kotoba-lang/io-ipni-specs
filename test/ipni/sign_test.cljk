@@ -12,7 +12,7 @@
   advertisement's fields must equal the payload inside their envelope, and
   their signature must verify over the record this code frames. Either one
   failing means our bytes are not go-libipni's bytes."
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [ipni.sign :as sign]
             #?(:cljs ["crypto" :as node-crypto])))
@@ -68,7 +68,7 @@
 
 (defn base64->octets [s]
   #?(:clj (vec (map #(bit-and % 0xFF)
-                    (.decode (java.util.Base64/getDecoder)
+                    (kbytes/base64-decode-bytes
                              (-> s (str/replace "-" "+") (str/replace "_" "/")
                                  (as-> t (str t (case (mod (count t) 4) 2 "==" 3 "=" "")))))))
      :cljs (vec (.from js/Array (js/Buffer.from s "base64")))))
